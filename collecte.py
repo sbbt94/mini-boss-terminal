@@ -87,7 +87,8 @@ def bougies_yahoo(tk):
     for tf, (rng, itv) in TF_YAHOO.items():
         try:
             out[tf] = yahoo(tk, rng, itv)
-        except Exception:
+        except Exception as e:
+            log(f"    Yahoo {tk} {tf} : {str(e)[:100]}")
             ERREURS.append(f"Yahoo {tk} {tf}")
     if not out:
         raise RuntimeError("aucune bougie")
@@ -95,10 +96,10 @@ def bougies_yahoo(tk):
 
 
 # ---------------------------------------------------------------- Binance (données publiques, accessibles depuis les États-Unis)
-def binance_klines(itv, total):
+def binance_klines(itv, total, symbole="BTCUSDT"):
     rows, fin = [], None
     while len(rows) < total:
-        p = {"symbol": "BTCUSDT", "interval": itv, "limit": 1000}
+        p = {"symbol": symbole, "interval": itv, "limit": 1000}
         if fin:
             p["endTime"] = fin
         lot = get("https://data-api.binance.vision/api/v3/klines", params=p).json()
@@ -135,9 +136,37 @@ def or_comptant():
     return (float(pr["bid"]) + float(pr["ask"])) / 2, "Swissquote"
 
 
+def marche_or_ouvert(t):
+    d = dt.datetime.fromtimestamp(t, dt.timezone.utc)
+    wd, h = d.weekday(), d.hour
+    return not (wd == 5 or (wd == 4 and h >= 22) or (wd == 6 and h < 23))
+
+
+def bougies_paxg():
+    """Or tokenisé PAXG (1 jeton = 1 once d'or) via l'API publique de Binance ; on retire les heures où le marché de l'or est fermé."""
+    out = {}
+    for tf, (itv, n) in {"M15": ("15m", 4000), "H1": ("1h", 6000), "H4": ("4h", 2000), "D1": ("1d", 2200), "W1": ("1w", 350), "MN1": ("1M", 80)}.items():
+        rows = binance_klines(itv, n, "PAXGUSDT")
+        if tf in ("M15", "H1", "H4"):
+            rows = [r for r in rows if marche_or_ouvert(r[0])]
+        elif tf == "D1":
+            rows = [r for r in rows if dt.datetime.fromtimestamp(r[0], dt.timezone.utc).weekday() < 5]
+        out[tf] = rows
+    return out
+
+
 def bougies_or():
-    C = bougies_yahoo("GC=F")
+    try:
+        C = bougies_yahoo("GC=F")
+    except Exception:
+        C = {}
     info = {"source": "Yahoo GC=F"}
+    if not C.get("D1") or not C.get("H1"):
+        log("    Yahoo indisponible pour l'or : je prends l'or tokenisé PAXG (Binance), recalé sur le prix au comptant")
+        for k in [e for e in ERREURS if e.startswith("Yahoo GC=F")]:
+            ERREURS.remove(k)
+        C = bougies_paxg()
+        info = {"source": "PAXG (Binance)"}
     try:
         spot, src = or_comptant()
         dernier = C.get("M15", C.get("H1", C.get("D1")))[-1][4]
@@ -162,6 +191,63 @@ def marches():
             out[nom] = {"ticker": tk, "d": d}
         except Exception:
             ERREURS.append("Yahoo " + nom)
+    for nom, sym in (("Bitcoin", "BTCUSDT"), ("Ethereum", "ETHUSDT")):
+        if nom not in out:
+            try:
+                out[nom] = {"ticker": sym, "d": [[r[0], r[4]] for r in binance_klines("1d", 730, sym)]}
+                ERREURS.remove("Yahoo " + nom)
+            except Exception:
+                pass
+    # Si Yahoo refuse : séries officielles FRED (clé gratuite FRED_API_KEY dans les secrets GitHub)
+    FRED_MARCHES = {"S&P 500": "SP500", "Nasdaq": "NASDAQCOM", "VIX": "VIXCLS", "Pétrole WTI": "DCOILWTICO",
+                    "EUR/USD": "DEXUSEU", "USD/JPY": "DEXJPUS", "Dollar (DXY)": "DTWEXBGS", "Taux 10 ans US": "DGS10"}
+    for nom, serie in FRED_MARCHES.items():
+        if nom in out or not FRED_KEY:
+            continue
+        try:
+            d = fred_api(serie)
+            out[nom] = {"ticker": "FRED " + serie, "d": [[int(dt.datetime.fromisoformat(j).replace(tzinfo=dt.timezone.utc).timestamp()), v] for j, v in d]}
+            ERREURS.remove("Yahoo " + nom)
+        except Exception:
+            pass
+    return out
+
+
+FRED_KEY = os.environ.get("FRED_API_KEY", "").strip()
+
+
+def fred_api(serie):
+    debut = (dt.date.today() - dt.timedelta(days=760)).isoformat()
+    j = get("https://api.stlouisfed.org/fred/series/observations",
+            params={"series_id": serie, "api_key": FRED_KEY, "file_type": "json", "observation_start": debut}).json()
+    return [[o["date"], float(o["value"])] for o in j["observations"] if o["value"] not in (".", "")]
+
+
+def tresor_us():
+    """Courbe des taux et taux réels publiés par le Trésor américain (home.treasury.gov)."""
+    out, an = {}, dt.date.today().year
+    NOM = {"3 mo": "DGS3MO", "6 mo": "DGS6MO", "1 yr": "DGS1", "2 yr": "DGS2", "5 yr": "DGS5", "7 yr": "DGS7", "10 yr": "DGS10", "20 yr": "DGS20", "30 yr": "DGS30"}
+    for typ, table in (("daily_treasury_yield_curve", NOM), ("daily_treasury_real_yield_curve", {"10 yr": "DFII10"})):
+        for a in (an - 2, an - 1, an):
+            try:
+                txt = get(f"https://home.treasury.gov/resource-center/data-chart-center/interest-rates/daily-treasury-rates.csv/{a}/all",
+                          params={"type": typ, "field_tdr_date_value": a, "page": "", "_format": "csv"}).text
+                rows = list(csv.reader(io.StringIO(txt)))
+                tete = [h.strip().lower() for h in rows[0]]
+                for col, serie in table.items():
+                    if col not in tete:
+                        continue
+                    i = tete.index(col)
+                    for r in rows[1:]:
+                        if len(r) > i and r[i].strip():
+                            m, j, y = r[0].split("/")
+                            out.setdefault(serie, {})[f"{y}-{m}-{j}"] = float(r[i])
+            except Exception:
+                pass
+    out = {k: [[d, v] for d, v in sorted(x.items())] for k, x in out.items()}
+    if "DGS10" in out and "DFII10" in out:
+        reel = dict(out["DFII10"])
+        out["T10YIE"] = [[d, round(v - reel[d], 2)] for d, v in out["DGS10"] if d in reel]
     return out
 
 
@@ -169,11 +255,26 @@ def fred():
     out, debut = {}, (dt.date.today() - dt.timedelta(days=760)).isoformat()
     for s in FRED:
         try:
-            txt = get(f"https://fred.stlouisfed.org/graph/fredgraph.csv?id={s}&cosd={debut}").text
-            rows = list(csv.reader(io.StringIO(txt)))
-            out[s] = [[r[0], float(r[1])] for r in rows[1:] if len(r) > 1 and r[1] not in (".", "")]
-        except Exception:
-            ERREURS.append("FRED " + s)
+            if FRED_KEY:
+                out[s] = fred_api(s)
+            else:
+                txt = get(f"https://fred.stlouisfed.org/graph/fredgraph.csv?id={s}&cosd={debut}").text
+                rows = list(csv.reader(io.StringIO(txt)))
+                out[s] = [[r[0], float(r[1])] for r in rows[1:] if len(r) > 1 and r[1] not in (".", "")]
+        except Exception as e:
+            if s == FRED[0]:
+                log("    FRED : " + str(e)[:100])
+    manque = [s for s in FRED if s not in out]
+    if manque:
+        tr = tresor_us()
+        for s in manque:
+            if s in tr:
+                out[s] = tr[s]
+        if tr:
+            log("    Taux repris du Trésor américain : " + ", ".join(s for s in manque if s in tr))
+    for s in FRED:
+        if s not in out:
+            ERREURS.append("Taux " + s)
     return out
 
 
@@ -306,7 +407,8 @@ def options(prix_or):
                     if 0.9 * gld <= k <= 1.1 * gld:
                         s = st.setdefault(k, {"k": round(k * ratio, 1), "call": 0.0, "put": 0.0})
                         s[cp] += float(r["openInterest"] or 0)
-            out["gold"] = {"expiry": ech, "src": "GLD converti en prix de l'or", "spot": prix_or, "strikes": [st[k] for k in sorted(st)]}
+            if st and prix_or:
+                out["gold"] = {"expiry": ech, "src": "GLD converti en prix de l'or", "spot": prix_or, "strikes": [st[k] for k in sorted(st)]}
     except Exception:
         ERREURS.append("Options GLD")
     return out
@@ -363,7 +465,15 @@ def main():
         data["candles"]["BTCUSD"], data["quotes"]["BTCUSD"] = r[0], {"source": r[1], "contract": 1}
     data["source_candles"] = "Yahoo/Binance"
     data["markets"] = essai("Marchés (Yahoo)", marches, defaut={})
+    if "Or" not in data["markets"] and data["candles"].get("XAUUSD", {}).get("D1"):
+        data["markets"]["Or"] = {"ticker": "XAUUSD", "d": [[b[0], b[4]] for b in data["candles"]["XAUUSD"]["D1"][-520:]]}
+        if "Yahoo Or" in ERREURS:
+            ERREURS.remove("Yahoo Or")
     data["fred"] = essai("Taux (FRED)", fred, defaut={})
+    if "Taux 10 ans US" not in data["markets"] and data["fred"].get("DGS10"):
+        data["markets"]["Taux 10 ans US"] = {"ticker": "DGS10", "d": [[int(dt.datetime.fromisoformat(j).replace(tzinfo=dt.timezone.utc).timestamp()), v] for j, v in data["fred"]["DGS10"]]}
+        if "Yahoo Taux 10 ans US" in ERREURS:
+            ERREURS.remove("Yahoo Taux 10 ans US")
     data["cot"] = essai("COT (CFTC)", cot, defaut={})
     data["crypto"] = essai("Crypto", crypto, defaut={})
     data["calendar"] = essai("Agenda (ForexFactory)", agenda, defaut=[])

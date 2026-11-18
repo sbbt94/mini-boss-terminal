@@ -3775,8 +3775,22 @@ function liveInit() {
   btcStream(); goldPoll();
 }
 
+/* ---------- garde : un marché sans bougies n'empêche pas la page de s'afficher ---------- */
+function needData(fn, tvAnyway) {
+  return el => {
+    const sym = MS.sym, other = MK.SYMS.find(s => s !== sym);
+    if (MA[sym]) { try { fn(el); } catch (e) { el.innerHTML = dataBand() + `<div class="panel"><p class="loss">Une partie de cette vue n'a pas pu s'afficher (${esc(e.message)}). Les données de certaines sources manquent sûrement : le robot réessaie toutes les 15 min.</p></div>`; } return; }
+    const px = LIVE.px[sym];
+    el.innerHTML = dataBand() + `<div class="panel empty-mk" style="text-align:center;padding:34px 20px"><h2 style="margin:0 0 8px">${MK.NAME[sym]} · ${sym}</h2>
+      ${px ? `<div class="pt-px mono" style="justify-content:center">${PX(px, sym)}</div><p class="muted">Prix en direct (${esc(LIVE.src[sym] || '')})</p>` : ''}
+      <p class="muted" style="max-width:520px;margin:10px auto 16px">${MD.kind === 'auto' ? `Le robot n'a pas pu récupérer l'historique des cours pour ${sym} à sa dernière mise à jour (${ago(MD.generated)}). Il réessaie tout seul toutes les 15 min.` : MD.kind === 'exemple' && ONLINE ? 'Chargement des données…' : 'Pas de données pour ' + sym + '. Charge le fichier du collecteur.'}</p>
+      ${MA[other] ? `<button class="btn gold sm" type="button" data-sym="${other}">Voir ${MK.NAME[other].toLowerCase()} (${other})</button>` : ''}</div>`;
+    if (tvAnyway && ONLINE) { el.insertAdjacentHTML('beforeend', `<div class="panel"><div class="panel-h"><h2>Graphique en direct (TradingView)</h2></div><div id="tvChart" style="height:520px"></div></div>`); tvWidget($('#tvChart'), 'embed-widget-advanced-chart.js', { symbol: sym === 'XAUUSD' ? 'OANDA:XAUUSD' : 'BITSTAMP:BTCUSD', interval: '15', timezone: 'Europe/Paris', theme: 'dark', style: '1', locale: 'fr', allow_symbol_change: true, autosize: true, backgroundColor: 'rgba(12,19,34,1)', studies: ['STD;RSI'] }); }
+  };
+}
+
 /* ---------- navigation ---------- */
-const RENDER = { vue: renderVue, tech: renderTechLive, fonda: renderFonda, agenda: renderAgendaLive, stats: renderStats, alertes: renderAlertes, tableau: renderTableau, analyse: renderAnalyse, avantage: renderAvantage, fuites: renderFuites, journal: renderJournal, etsi: renderEtsi, projection: renderProjection, outils: renderOutils, academie: renderAcademie, donnees: renderDonnees };
+const RENDER = { vue: needData(renderVue), tech: needData(renderTechLive, true), fonda: needData(renderFonda), agenda: needData(renderAgendaLive), stats: needData(renderStats), alertes: renderAlertes, tableau: renderTableau, analyse: renderAnalyse, avantage: renderAvantage, fuites: renderFuites, journal: renderJournal, etsi: renderEtsi, projection: renderProjection, outils: renderOutils, academie: renderAcademie, donnees: renderDonnees };
 function render() {
   Object.keys(charts).forEach(k => { charts[k].destroy(); delete charts[k]; });
   $$('.view').forEach(v => { v.hidden = v.id !== 'v-' + view; });
