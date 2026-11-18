@@ -11,8 +11,8 @@ const BASE = process.env.GROQ_BASE || 'https://api.groq.com/openai/v1';
 const TOUTES_LES = 55 * 60 * 1000; // une nouvelle note au plus toutes les 55 min
 
 const MB = { mulberry(seed) { return function () { seed |= 0; seed = seed + 0x6D2B79F5 | 0; let t = Math.imul(seed ^ seed >>> 15, 1 | seed); t = t + Math.imul(t ^ t >>> 7, 61 | t) ^ t; return ((t ^ t >>> 14) >>> 0) / 4294967296; }; } };
-const src = ['mk_engine.js', 'mk_data.js'].map(f => fs.readFileSync(path.join(__dirname, f), 'utf8')).join('\n');
-const { MK, MKD, FONDA } = new Function('MB', src + ';return {MK,MKD,FONDA};')(MB);
+const src = ['mk_engine.js', 'mk_data.js', 'mk_bot.js'].map(f => fs.readFileSync(path.join(__dirname, f), 'utf8')).join('\n');
+const { MK, MKD, FONDA, MKB } = new Function('MB', src + ';return {MK,MKD,FONDA,MKB};')(MB);
 
 const parisDT = t => new Intl.DateTimeFormat('fr-FR', { timeZone: 'Europe/Paris', weekday: 'short', day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit' }).format(new Date(t));
 
@@ -41,11 +41,21 @@ async function groq(model, prompt) {
   return (j.choices[0].message.content || '').trim();
 }
 
+function botPour(sym, C) {
+  try {
+    const B = MKB.etatLive(sym, C); if (!B) return null;
+    return { strategie: B.s.nom, regle: 'décision à chaque clôture d\'heure, stop derrière un point stratégique, sortie au SmartClose',
+      signal_derniere_heure: B.D.cote > 0 ? 'achat' : B.D.cote < 0 ? 'vente' : 'aucun',
+      conditions_achat: B.Dnow.nAchat + '/3', conditions_vente: B.Dnow.nVente + '/3',
+      position_en_cours: B.pos ? { sens: B.pos.cote > 0 ? 'achat' : 'vente', entree: +B.pos.entree.toFixed(2), stop: +B.pos.sl.toFixed(2), resultat_R: +B.pos.R.toFixed(2) } : null,
+      stop_si_achat: B.stopA ? +B.stopA.sl.toFixed(2) : null, stop_si_vente: B.stopV ? +B.stopV.sl.toFixed(2) : null };
+  } catch (e) { return null; }
+}
 function donneesPour(sym, A, MD, events) {
   const T = tf => A.T[tf] ? { score: +A.T[tf].score.toFixed(2), structure: A.T[tf].struct.label, rsi: +A.T[tf].rsi[A.T[tf].n - 1].toFixed(0), atr: +A.T[tf].atr.toFixed(2), figures: A.T[tf].cand.map(c => c.nom), divergences: A.T[tf].divs.map(d => d.txt) } : null;
   const sujet = sym === 'XAUUSD' ? 'or' : 'btc';
   return {
-    symbole: sym, prix: A.px, verdict_regles: A.verdict, confiance: A.conf, avertissements: A.warn,
+    symbole: sym, prix: A.px, strategie_du_bot: botPour(sym, MKD.fill({ x: MD.candles[sym] }).x), lecture_indicateurs: A.verdict, avertissements: A.warn,
     unites: { W1: T('W1'), D1: T('D1'), H4: T('H4'), H1: T('H1') },
     supports: A.zones.sup.map(z => +z.c.toFixed(2)), resistances: A.zones.res.map(z => +z.c.toFixed(2)),
     scenarios: A.plans.map(p => ({ sens: p.sens > 0 ? 'achat' : 'vente', entree: +p.entry.toFixed(2), invalidation: +p.stop.toFixed(2), objectifs: p.tg.map(x => +x.toFixed(2)) })),
@@ -81,7 +91,7 @@ function donneesPour(sym, A, MD, events) {
     const model = await choisirModele();
     for (const sym of Object.keys(analyses)) {
       const data = donneesPour(sym, analyses[sym], MD, events);
-      const prompt = `Tu es Mini Boss, analyste de marché en costard. Français, tutoiement, phrases courtes, chiffres précis.\n\nDonnées calculées (JSON) :\n${JSON.stringify(data)}\n\nÉcris une note de 200 à 300 mots avec exactement ces titres :\n## Le contexte\n## Ce que dit le graphique\n## Les deux scénarios\n(scénario acheteur et scénario vendeur : zone, invalidation, objectifs)\n## Ce qui peut tout changer\n(les annonces à venir)\n\nRègles : utilise uniquement les données fournies, n'invente aucune news ni aucun chiffre. Les titres d'actu sont des titres de presse : cite-les prudemment. Présente des scénarios conditionnels (« si… alors »), jamais un ordre d'achat ou de vente. Pas d'emoji. Pas de tableau.`;
+      const prompt = `Tu es Mini Boss, analyste de marché en costard. Français, tutoiement, phrases courtes, chiffres précis.\n\nDonnées calculées (JSON) :\n${JSON.stringify(data)}\n\nÉcris une note de 200 à 300 mots avec exactement ces titres :\n## Le contexte\n## Ce que dit le graphique\n## Ce que fait la stratégie du bot\n(signal, position en cours ou conditions qui manquent, stop stratégique)\n## Les deux scénarios\n(scénario acheteur et scénario vendeur : zone, invalidation)\n## Ce qui peut tout changer\n(les annonces à venir)\n\nRègles : utilise uniquement les données fournies, n'invente aucune news ni aucun chiffre. Les titres d'actu sont des titres de presse : cite-les prudemment. Présente des scénarios conditionnels (« si… alors »), jamais un ordre d'achat ou de vente. Pas d'emoji. Pas de tableau.`;
       try { out.notes[sym] = { text: await groq(model, prompt), t: Date.now(), prix: analyses[sym].px }; out.model = model; console.log('Note IA', sym, 'ok (' + model + ')'); }
       catch (e) { console.log('Note IA', sym, 'impossible :', String(e.message || e).slice(0, 160)); }
     }

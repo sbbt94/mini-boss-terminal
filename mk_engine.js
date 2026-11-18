@@ -392,7 +392,8 @@ MK.analyze = (sym, data, opts = {}) => {
   const ref = T.H4 || base;
   if (sens > 0 && (ref.rsi[ref.n - 1] >= 72 || ref.ext >= 2.2)) warn.push('Le prix est déjà loin au-dessus de sa moyenne (surachat) : mieux vaut attendre un repli que courir après.');
   if (sens < 0 && (ref.rsi[ref.n - 1] <= 28 || ref.ext <= -2.2)) warn.push('Le prix est déjà très loin sous sa moyenne (survente) : un rebond technique peut arriver à tout moment, ne pas vendre au plus bas.');
-  const nextEv = opts.events ? opts.events.find(e => e.ts > Date.now() && e.ts - Date.now() <= 3 * 36e5 && e.imp >= 3) : null;
+  const now = opts.now || Date.now();
+  const nextEv = opts.events ? opts.events.find(e => e.ts > now && e.ts - now <= 3 * 36e5 && e.imp >= 3) : null;
   if (nextEv) { warn.push(`Annonce importante dans moins de 3 h (${nextEv.e}) : forte volatilité possible.`); }
   if (T.H1 && T.H1.volLab === 'extrême') warn.push('Volatilité extrême en ce moment : les stops sautent facilement.');
   const nuance = sens && warn.length ? (verdict === 'ATTENDRE' ? '' : 'avec prudence') : '';
@@ -532,4 +533,89 @@ MK.sessionsHistory = (D, atrPct, markets, k = 7) => {
     out.push({ t: b.t, pct, abs: b.c - p.c, rng: b.h - b.l, lab, drv });
   }
   return out;
+};
+
+/* ═══════════════ BACKTEST : on rejoue le moteur heure par heure, sans voir le futur ═══════════════ */
+// C : bougies { M15, H1, H4, D1, W1 } ; o : { jours, entree: 'plan'|'marche', filtre: 'tous'|'strict', spread, validite (h), events }
+MK.backtest = (sym, C, o = {}) => {
+  const jours = o.jours || 30, spread = o.spread || 0, valid = (o.validite || 24) * 36e5, KEEP = 320;
+  const H1 = C.H1 || [], EX = C.M15 && C.M15.length ? H1.filter(b => b.t + 36e5 <= C.M15[0].t).map(b => ({ ...b, d: 36e5 })).concat(C.M15) : H1;
+  if (H1.length < 260) return null;
+  const fin = H1[H1.length - 1].t + 36e5;
+  const debut = Math.max(fin - jours * 864e5, H1[220].t);
+  const tfs = ['M15', 'H1', 'H4', 'D1', 'W1'].filter(tf => C[tf] && C[tf].length);
+  const ends = {}; tfs.forEach(tf => { const B = C[tf], d = { M15: 9e5, H1: 36e5, H4: 144e5, D1: 864e5, W1: 6048e5 }[tf]; ends[tf] = B.map((b, i) => i + 1 < B.length ? Math.min(B[i + 1].t, b.t + d) : b.t + d); });
+  const lastBefore = (B, t) => { let lo = 0, hi = B.length - 1, r = -1; while (lo <= hi) { const m = (lo + hi) >> 1; if (B[m].t < t) { r = m; lo = m + 1; } else hi = m - 1; } return r; };
+  // vue du marché à l'instant « now » : bougies clôturées + bougie en cours reconstruite avec les petites bougies
+  const fine = C.M15 && C.M15.length ? C.M15 : H1;
+  const snapshot = now => {
+    const D = {};
+    tfs.forEach(tf => {
+      const B = C[tf], i = lastBefore(B, now); if (i < 0) return;
+      const from = Math.max(0, i - KEEP);
+      if (ends[tf][i] <= now) { D[tf] = B.slice(from, i + 1); return; }
+      const out = B.slice(from, i), a = lastBefore(fine, B[i].t) + 1, z = lastBefore(fine, now);
+      const part = fine.slice(Math.max(a, 0), z + 1).filter(b => b.t >= B[i].t && b.t + (fine === H1 ? 36e5 : 9e5) <= now);
+      if (part.length) out.push({ t: B[i].t, o: part[0].o, h: Math.max(...part.map(b => b.h)), l: Math.min(...part.map(b => b.l)), c: part[part.length - 1].c, v: part.reduce((s, b) => s + b.v, 0) });
+      D[tf] = out;
+    });
+    return D;
+  };
+  const steps = H1.filter(b => b.t + 36e5 > debut && b.t + 36e5 <= fin).map(b => b.t + 36e5);
+  const trades = [], signaux = [];
+  let pos = null, ord = null, k = 0, exI = lastBefore(EX, steps[0] || fin) + 1, ep = 0, epBloque = false, last = null;
+  const exDur0 = C.M15 && C.M15.length ? 9e5 : 36e5;
+  const close = (exit, t, why) => { const R = ((exit - pos.entry) * pos.sens - spread) / pos.risk; trades.push({ ...pos, exit, tClose: t, R, res: why }); if (R < 0) epBloque = true; pos = null; };
+  const runBars = until => {
+    while (exI < EX.length && EX[exI].t + (EX[exI].d || exDur0) <= until) {
+      const b = EX[exI++], exDur = b.d || exDur0;
+      if (ord && !pos) {
+        if (b.t - ord.t0 > valid) ord = null;
+        else if ((ord.sens > 0 && b.l <= ord.entry) || (ord.sens < 0 && b.h >= ord.entry)) {
+          const px = ord.sens > 0 ? Math.min(b.o, ord.entry) : Math.max(b.o, ord.entry);
+          pos = { sym, sens: ord.sens, tOpen: b.t, entry: px, stop: ord.stop, tp: ord.tp, risk: Math.abs(px - ord.stop), plan: ord.plan, conf: ord.conf }; ord = null;
+        }
+      }
+      if (pos) {
+        const hitS = pos.sens > 0 ? b.l <= pos.stop : b.h >= pos.stop, hitT = pos.sens > 0 ? b.h >= pos.tp : b.l <= pos.tp;
+        if (hitS) close(pos.sens > 0 ? Math.min(b.o, pos.stop) : Math.max(b.o, pos.stop), b.t + exDur, 'stop');
+        else if (hitT) close(pos.tp, b.t + exDur, 'objectif');
+      }
+    }
+  };
+  const step = n => {
+    for (let s = 0; s < n && k < steps.length; s++, k++) {
+      const now = steps[k];
+      runBars(now);
+      const A = MK.analyze(sym, snapshot(now), { events: o.events, now });
+      if (!A) continue;
+      last = A;
+      signaux.push({ t: now, v: A.verdict, px: A.px });
+      const sens = A.verdict === 'ACHAT' ? 1 : A.verdict === 'VENTE' ? -1 : 0;
+      if (sens !== ep) { ep = sens; epBloque = false; if (ord && ord.sens !== sens) ord = null; }
+      if (!sens || pos || ord || epBloque) continue;
+      const P = A.plans.find(p => p.sens === sens);
+      if (o.filtre === 'strict' && !(A.T.D1 && A.T.H4 && A.T.D1.dir === sens && A.T.H4.dir === sens && P.rr >= 1.5 && !A.warn.length)) continue;
+      const tp = P.tg[0];
+      if (Math.abs(P.entry - P.stop) > 2.5 * A.atrD) continue; // stop trop large : le terminal te dirait que la taille est trop petite
+      if (o.entree === 'marche' || (sens > 0 ? P.entry >= A.px : P.entry <= A.px)) {
+        const entry = A.px;
+        if ((sens > 0 && (P.stop >= entry || tp <= entry)) || (sens < 0 && (P.stop <= entry || tp >= entry))) continue;
+        pos = { sym, sens, tOpen: now, entry, stop: P.stop, tp, risk: Math.abs(entry - P.stop), plan: 'marché', conf: A.conf };
+      } else ord = { sens, entry: P.entry, stop: P.stop, tp, t0: now, plan: 'limite', conf: A.conf };
+    }
+    if (k >= steps.length) {
+      runBars(fin + 1);
+      if (pos) { const px = EX[EX.length - 1].c; trades.push({ ...pos, exit: px, tClose: null, R: ((px - pos.entry) * pos.sens - spread) / pos.risk, res: 'ouvert' }); pos = null; }
+    }
+    return { fait: k, total: steps.length, fini: k >= steps.length };
+  };
+  const bh = () => { const a = steps.length ? H1[lastBefore(H1, steps[0])] : null, z = H1[H1.length - 1]; return a ? (z.c / a.c - 1) * 100 : NaN; };
+  return { sym, debut, fin, step, trades, signaux, bh, get last() { return last; } };
+};
+MK.btStats = trades => {
+  const T = trades.filter(t => t.res !== 'ouvert'), R = T.map(t => t.R), g = R.filter(r => r > 0), p = R.filter(r => r <= 0);
+  let eq = 0, pk = 0, dd = 0; const courbe = [];
+  trades.slice().sort((a, b) => (a.tClose || Infinity) - (b.tClose || Infinity)).forEach(t => { eq += t.R; pk = Math.max(pk, eq); dd = Math.min(dd, eq - pk); courbe.push({ t: t.tClose || Date.now(), eq, R: t.R }); });
+  return { n: T.length, ouverts: trades.length - T.length, gagnants: g.length, perdants: p.length, reussite: T.length ? g.length / T.length : NaN, totalR: R.reduce((s, x) => s + x, 0), totalAvecOuverts: eq, moyR: R.length ? R.reduce((s, x) => s + x, 0) / R.length : NaN, pf: p.length ? g.reduce((s, x) => s + x, 0) / -p.reduce((s, x) => s + x, 0) : (g.length ? Infinity : NaN), ddR: dd, meilleur: R.length ? Math.max(...R) : NaN, pire: R.length ? Math.min(...R) : NaN, courbe };
 };

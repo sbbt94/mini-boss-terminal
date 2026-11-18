@@ -38,7 +38,7 @@ def log(*a):
 
 
 def get(url, **kw):
-    r = S.get(url, timeout=25, **kw)
+    r = S.get(url, timeout=15, **kw)
     r.raise_for_status()
     return r
 
@@ -56,7 +56,12 @@ def essai(nom, fn, *a, defaut=None):
 
 
 # ---------------------------------------------------------------- Yahoo (API des graphiques, sans clé)
+COUPE = set()   # sources qui refusent : on ne les rappelle plus pendant ce passage (le robot va plus vite)
+
+
 def yahoo(tk, rng, itv):
+    if "yahoo" in COUPE:
+        raise RuntimeError("Yahoo refuse les serveurs de GitHub (ignoré pour ce passage)")
     der = None
     for hote in ("query1", "query2"):
         try:
@@ -76,6 +81,7 @@ def yahoo(tk, rng, itv):
         except Exception as e:
             der = e
         time.sleep(1)
+    COUPE.add("yahoo")
     raise der
 
 
@@ -257,6 +263,8 @@ def fred():
         try:
             if FRED_KEY:
                 out[s] = fred_api(s)
+            elif "fred" in COUPE:
+                continue
             else:
                 txt = get(f"https://fred.stlouisfed.org/graph/fredgraph.csv?id={s}&cosd={debut}").text
                 rows = list(csv.reader(io.StringIO(txt)))
@@ -264,6 +272,8 @@ def fred():
         except Exception as e:
             if s == FRED[0]:
                 log("    FRED : " + str(e)[:100])
+            if not FRED_KEY:
+                COUPE.add("fred")
     manque = [s for s in FRED if s not in out]
     if manque:
         tr = tresor_us()
