@@ -104,7 +104,8 @@ MKB.rejoue = (sym, C, debutMs, finMs, o = {}) => {
   const s = MKB.STRAT[sym], X = o.X || MKB.contexte(C), m = X.M15; if (!m || !X.H1) return null;
   const cout = o.cout != null ? o.cout : s.cout, debut = debutMs / 1000, fin = finMs / 1000;
   const fine = (C.M5 && C.M5.length ? C.M5 : null), trades = [], journal = []; let pos = null, j = 0, refus = 0;
-  const sortir = (prix, T, raison) => { const R = ((prix - pos.entree) * pos.cote - cout) / Math.abs(pos.entree - pos.sl); trades.push({ ...pos, sortie: prix, fin: T * 1000, raison, R }); pos = null; };
+  const cx = p => o.coutPct ? p.entree * o.coutPct : cout;
+  const sortir = (prix, T, raison) => { const R = ((prix - pos.entree) * pos.cote - cx(pos)) / Math.abs(pos.entree - pos.sl); trades.push({ ...pos, sortie: prix, fin: T * 1000, raison, R }); pos = null; };
   const stopBars = (from, to) => { // bougies plus fines (M5) si présentes, sinon la bougie M15 elle-même
     if (!fine) return;
     while (j < fine.length && fine[j].t / 1000 + 300 <= to) { const b = fine[j++]; if (!pos || b.t / 1000 < pos.debut) continue; const c = pos.cote; if ((c > 0 && b.l <= pos.sl) || (c < 0 && b.h >= pos.sl)) sortir(c > 0 ? Math.min(b.o, pos.sl) : Math.max(b.o, pos.sl), b.t / 1000 + 300, 'stop'); }
@@ -132,7 +133,7 @@ MKB.rejoue = (sym, C, debutMs, finMs, o = {}) => {
   }
   const dernier = m.B[Math.min(m.B.length - 1, MKB.idx(m.ends, fin))];
   let ouvert = null;
-  if (pos) { ouvert = { ...pos, prix: dernier.c, R: ((dernier.c - pos.entree) * pos.cote - cout) / Math.abs(pos.entree - pos.sl) }; trades.push({ ...ouvert, fin: null, raison: 'ouvert', sortie: dernier.c }); }
+  if (pos) { ouvert = { ...pos, prix: dernier.c, R: ((dernier.c - pos.entree) * pos.cote - cx(pos)) / Math.abs(pos.entree - pos.sl) }; trades.push({ ...ouvert, fin: null, raison: 'ouvert', sortie: dernier.c }); }
   return { sym, trades, refus, ouvert, journal, X };
 };
 // état complet pour l'affichage (signal de la dernière heure, position virtuelle, SmartClose)

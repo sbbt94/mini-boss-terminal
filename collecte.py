@@ -294,8 +294,13 @@ def cot():
         r = get("https://publicreporting.cftc.gov/resource/72hh-3qpy.json", params={
             "$where": "market_and_exchange_names like 'GOLD - COMMODITY EXCHANGE INC.%'",
             "$order": "report_date_as_yyyy_mm_dd DESC", "$limit": "160"}).json()
+        def ch(x, *mots):
+            k = next((k for k in x if all(m in k for m in mots)), None)
+            return float(x[k]) if k else 0.0
         out["gold"] = [{"date": x["report_date_as_yyyy_mm_dd"][:10], "long": float(x.get("m_money_positions_long_all", 0)),
-                        "short": float(x.get("m_money_positions_short_all", 0)), "oi": float(x.get("open_interest_all", 0))} for x in r][::-1]
+                        "short": float(x.get("m_money_positions_short_all", 0)), "oi": float(x.get("open_interest_all", 0)),
+                        "swap_long": ch(x, "swap", "long_all"), "swap_short": ch(x, "swap", "short_all"),
+                        "prod_long": ch(x, "prod_merc", "long_all"), "prod_short": ch(x, "prod_merc", "short_all")} for x in r][::-1]
     except Exception:
         ERREURS.append("CFTC or")
     try:
@@ -389,12 +394,20 @@ def options(prix_or):
             if not (dt.date.today() < ech <= dt.date.today() + dt.timedelta(days=40)):
                 continue
             k, cp, oi = int(m.group(4)), m.group(5), float(x.get("open_interest") or 0)
-            s = par_ech.setdefault(ech, {}).setdefault(k, {"k": k, "call": 0.0, "put": 0.0})
+            s = par_ech.setdefault(ech, {}).setdefault(k, {"k": k, "call": 0.0, "put": 0.0, "iv": []})
             s["call" if cp == "C" else "put"] += oi
+            if x.get("mark_iv"):
+                s["iv"].append(float(x["mark_iv"]))
         if par_ech:
             ech = max(par_ech, key=lambda d: sum(s["call"] + s["put"] for s in par_ech[d].values()))
             st = [s for s in par_ech[ech].values() if 0.75 * spot <= s["k"] <= 1.25 * spot]
-            out["btc"] = {"expiry": ech.isoformat(), "src": "Deribit (en BTC)", "spot": spot, "strikes": sorted(st, key=lambda s: s["k"])}
+            proche = sorted(par_ech[ech].values(), key=lambda s: abs(s["k"] - spot))[:2]
+            ivs = [v for s in proche for v in s["iv"]]
+            tous = [s for e in par_ech.values() for s in e.values()]
+            out["btc"] = {"expiry": ech.isoformat(), "src": "Deribit (en BTC)", "spot": spot,
+                          "strikes": sorted([{"k": s["k"], "call": s["call"], "put": s["put"]} for s in st], key=lambda s: s["k"]),
+                          "iv_atm": round(sum(ivs) / len(ivs), 1) if ivs else None, "echeances": len(par_ech),
+                          "calls_total": round(sum(s["call"] for s in tous)), "puts_total": round(sum(s["put"] for s in tous))}
     except Exception:
         ERREURS.append("Options Deribit")
     try:
@@ -418,7 +431,7 @@ def options(prix_or):
                         s = st.setdefault(k, {"k": round(k * ratio, 1), "call": 0.0, "put": 0.0})
                         s[cp] += float(r["openInterest"] or 0)
             if st and prix_or:
-                out["gold"] = {"expiry": ech, "src": "GLD converti en prix de l'or", "spot": prix_or, "strikes": [st[k] for k in sorted(st)]}
+                out["gold"] = {"expiry": ech, "src": "GLD converti en prix de l'or", "spot": prix_or, "strikes": [st[k] for k in sorted(st)], "echeances": len(g.options)}
     except Exception:
         ERREURS.append("Options GLD")
     return out
@@ -439,7 +452,9 @@ def agenda():
 
 
 def news():
-    REQ = {"or": "prix de l'or OR \"once d'or\" OR \"cours de l'or\"", "btc": "bitcoin OR crypto", "macro": "Fed taux OR inflation OR dollar OR \"banque centrale\""}
+    REQ = {"or": "prix de l'or OR \"once d'or\" OR \"cours de l'or\"", "btc": "bitcoin OR crypto",
+           "macro": "Fed taux OR inflation OR \"Réserve fédérale\" OR dollar", "geo": "pétrole OR géopolitique OR Iran OR Ormuz OR guerre OR OPEP",
+           "flux": "\"banques centrales\" or OR \"ETF or\" OR \"réserves d'or\" OR \"achats d'or\""}
     out, vus = [], set()
     for sujet, q in REQ.items():
         try:
@@ -460,7 +475,109 @@ def news():
         except Exception:
             ERREURS.append("News " + sujet)
     out.sort(key=lambda x: -x["t"])
-    return out[:150]
+    return out[:220]
+
+
+# ---------------------------------------------------------------- macro (FRED, avec la clé gratuite FRED_API_KEY)
+MACRO = {  # série : (nom, transformation)
+    "SP500": "S&P 500", "NASDAQCOM": "Nasdaq", "VIXCLS": "VIX", "DCOILBRENTEU": "Brent", "DCOILWTICO": "WTI",
+    "DTWEXBGS": "Dollar (indice large)", "DEXUSEU": "EUR/USD", "DEXJPUS": "USD/JPY", "DEXUSUK": "GBP/USD", "DEXSZUS": "USD/CHF",
+    "DEXCAUS": "USD/CAD", "DEXUSAL": "AUD/USD", "DEXCHUS": "USD/CNY", "DEXINUS": "USD/INR",
+    "BAMLH0A0HYM2": "Écart high yield", "NFCI": "Conditions financières (Chicago Fed)", "THREEFYTP10": "Prime de terme 10 ans",
+    "EFFR": "Taux effectif Fed", "SOFR": "SOFR", "DFEDTARU": "Cible Fed haute", "DFEDTARL": "Cible Fed basse",
+    "WALCL": "Bilan Fed", "WTREGEN": "Compte du Trésor", "RRPONTSYD": "Reverse repo", "GVZCLS": "Volatilité de l'or (GVZ)",
+    "CPIAUCSL": "CPI", "CPILFESL": "CPI hors énergie et alimentation", "PCEPILFE": "PCE cœur", "UNRATE": "Chômage",
+    "PAYEMS": "Emplois non agricoles", "ICSA": "Inscriptions au chômage", "MICH": "Inflation attendue (Michigan)", "T5YIE": "Inflation attendue 5 ans",
+}
+
+
+def macro():
+    if not FRED_KEY:
+        raise RuntimeError("pas de clé FRED_API_KEY (gratuite sur fred.stlouisfed.org)")
+    out = {}
+    for serie in MACRO:
+        try:
+            debut = (dt.date.today() - dt.timedelta(days=760 if serie not in ("CPIAUCSL", "CPILFESL", "PCEPILFE", "UNRATE", "PAYEMS", "MICH") else 1200)).isoformat()
+            j = get("https://api.stlouisfed.org/fred/series/observations",
+                    params={"series_id": serie, "api_key": FRED_KEY, "file_type": "json", "observation_start": debut}).json()
+            out[serie] = [[o["date"], float(o["value"])] for o in j["observations"] if o["value"] not in (".", "")]
+        except Exception:
+            ERREURS.append("FRED " + serie)
+    return out
+
+
+# ---------------------------------------------------------------- enchères du Trésor américain (TreasuryDirect)
+def encheres():
+    out = {"a_venir": [], "resultats": []}
+    try:
+        for x in get("https://www.treasurydirect.gov/TA_WS/securities/upcoming", params={"format": "json"}).json()[:20]:
+            if x.get("securityType") in ("Note", "Bond", "TIPS", "FRN"):
+                out["a_venir"].append({"date": (x.get("auctionDate") or "")[:10], "titre": f'{x.get("securityTerm", "")} {x.get("securityType", "")}'.strip(),
+                                       "montant": x.get("offeringAmount")})
+    except Exception:
+        ERREURS.append("Enchères à venir")
+    try:
+        for x in get("https://www.treasurydirect.gov/TA_WS/securities/auctioned", params={"format": "json", "days": 45}).json():
+            if x.get("securityType") in ("Note", "Bond", "TIPS") and x.get("bidToCoverRatio"):
+                acc = float(x.get("totalAccepted") or 0) or 1
+                out["resultats"].append({"date": (x.get("auctionDate") or "")[:10], "titre": f'{x.get("securityTerm", "")} {x.get("securityType", "")}'.strip(),
+                                         "rendement": float(x.get("highYield") or x.get("highDiscountRate") or 0), "couverture": float(x["bidToCoverRatio"]),
+                                         "etrangers": round(100 * float(x.get("indirectBidderAccepted") or 0) / acc, 1)})
+    except Exception:
+        ERREURS.append("Résultats d'enchères")
+    return out
+
+
+# ---------------------------------------------------------------- communications officielles de la Fed
+def fed_rss():
+    out = []
+    for typ, url in (("communiqué", "https://www.federalreserve.gov/feeds/press_all.xml"), ("discours", "https://www.federalreserve.gov/feeds/speeches.xml")):
+        try:
+            for it in list(ET.fromstring(get(url).content).iter("item"))[:8]:
+                try:
+                    t = int(parsedate_to_datetime(it.findtext("pubDate")).timestamp() * 1000)
+                except Exception:
+                    t = None
+                out.append({"type": typ, "t": t, "title": (it.findtext("title") or "").strip(), "link": it.findtext("link") or ""})
+        except Exception:
+            ERREURS.append("Fed " + typ)
+    return out
+
+
+# ---------------------------------------------------------------- avoirs de l'ETF GLD (SPDR)
+def gld():
+    txt = get("https://www.spdrgoldshares.com/assets/dynamic/GLD/GLD_US_archive_EN.csv").text
+    rows = [r for r in csv.reader(io.StringIO(txt)) if r]
+    tete = next(i for i, r in enumerate(rows) if r and r[0].strip().lower() == "date")
+    cols = [c.strip().lower() for c in rows[tete]]
+    it = next(i for i, c in enumerate(cols) if "tonnes" in c)
+    out = []
+    for r in rows[tete + 1:]:
+        try:
+            d = dt.datetime.strptime(r[0].strip(), "%d-%b-%Y").date().isoformat()
+            out.append([d, float(r[it].replace(",", ""))])
+        except Exception:
+            continue
+    return out[-400:]
+
+
+# ---------------------------------------------------------------- historique des annonces (gardé d'un passage à l'autre)
+def historique_annonces(cal):
+    hist = {}
+    repo = os.environ.get("GITHUB_REPOSITORY", "")
+    if "/" in repo:
+        o, r = repo.split("/")
+        try:
+            for e in get(f"https://{o.lower()}.github.io/{r}/data/donnees.json?t={int(time.time())}").json().get("calendar_hist", []):
+                hist[(e.get("date"), e.get("title"))] = e
+        except Exception:
+            pass
+    for e in cal:
+        if e.get("impact") in ("High", "Medium") and e.get("country") == "USD":
+            k = (e.get("date"), e.get("title"))
+            hist[k] = {**hist.get(k, {}), **{a: b for a, b in e.items() if b not in (None, "")}}
+    limite = (dt.datetime.now(dt.timezone.utc) - dt.timedelta(days=800)).isoformat()
+    return sorted([e for e in hist.values() if (e.get("date") or "") >= limite], key=lambda e: e.get("date") or "")
 
 
 # ---------------------------------------------------------------- principal
@@ -490,6 +607,11 @@ def main():
     data["news"] = essai("News (Google)", news, defaut=[])
     po = data["candles"].get("XAUUSD", {}).get("D1", [[0, 0, 0, 0, 0]])[-1][4]
     data["options"] = essai("Options", options, po, defaut={})
+    data["macro"] = essai("Macro (FRED)", macro, defaut={})
+    data["encheres"] = essai("Enchères (TreasuryDirect)", encheres, defaut={})
+    data["fed_rss"] = essai("Fed (communiqués et discours)", fed_rss, defaut=[])
+    data["gld"] = essai("ETF GLD (SPDR)", gld, defaut=[])
+    data["calendar_hist"] = essai("Historique des annonces", historique_annonces, data.get("calendar") or [], defaut=[])
     data["errors"] = ERREURS[:]
     os.makedirs(os.path.dirname(os.path.abspath(SORTIE)), exist_ok=True)
     with open(SORTIE, "w", encoding="utf-8") as f:

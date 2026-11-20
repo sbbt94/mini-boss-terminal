@@ -86,6 +86,10 @@ MKD.fromCollector = o => {
   Object.keys(o.markets || {}).forEach(k => { const m = o.markets[k]; D.markets.push({ nom: k, tk: m.ticker, d: (m.d || []).map(x => [x[0] < 1e12 ? x[0] * 1000 : x[0], +x[1]]).filter(x => isFinite(x[1])) }); });
   Object.keys(o.fred || {}).forEach(k => { D.fred[k] = (o.fred[k] || []).map(x => [typeof x[0] === 'string' ? Date.parse(x[0]) : x[0], +x[1]]).filter(x => isFinite(x[1])); });
   D.calendar = (o.calendar || []).map(e => ({ ts: Date.parse(e.date), e: e.title, pays: e.country, imp: /high/i.test(e.impact) ? 3 : /medium/i.test(e.impact) ? 2 : /holiday/i.test(e.impact) ? 1 : 1, prev: e.previous, prev_: e.previous, fc: e.forecast, act: e.actual })).filter(e => isFinite(e.ts));
+  const pd = x => [typeof x[0] === 'string' ? Date.parse(x[0] + (x[0].length <= 10 ? 'T00:00:00Z' : '')) : x[0], +x[1]];
+  D.macro = {}; Object.keys(o.macro || {}).forEach(k => { D.macro[k] = (o.macro[k] || []).map(pd).filter(x => isFinite(x[1])); });
+  D.encheres = o.encheres || {}; D.fedRss = o.fed_rss || []; D.gld = (o.gld || []).map(pd).filter(x => isFinite(x[1]));
+  D.calHist = (o.calendar_hist || []).map(e => ({ ts: Date.parse(e.date), e: e.title, pays: e.country, imp: /high/i.test(e.impact) ? 3 : /medium/i.test(e.impact) ? 2 : 1, fc: e.forecast, prev_: e.previous, act: e.actual })).filter(e => isFinite(e.ts));
   D.news = (o.news || []).map(n => ({ t: typeof n.t === 'number' ? n.t : Date.parse(n.t), title: n.title, src: n.source || '', link: n.link || '', topic: n.topic || 'macro' })).filter(n => isFinite(n.t)).sort((a, b) => b.t - a.t);
   return D;
 };

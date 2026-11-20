@@ -33,7 +33,7 @@ async function choisirModele() {
 }
 
 async function groq(model, prompt) {
-  const body = { model, temperature: 0.4, max_tokens: 1400, messages: [{ role: 'user', content: prompt }] };
+  const body = { model, temperature: 0.4, max_tokens: 2000, messages: [{ role: 'user', content: prompt }] };
   if (/gpt-oss/.test(model)) body.reasoning_effort = 'low';
   const r = await fetch(BASE + '/chat/completions', { method: 'POST', headers: { Authorization: 'Bearer ' + KEY, 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
   const j = await r.json();
@@ -91,7 +91,7 @@ function donneesPour(sym, A, MD, events) {
     const model = await choisirModele();
     for (const sym of Object.keys(analyses)) {
       const data = donneesPour(sym, analyses[sym], MD, events);
-      const prompt = `Tu es Mini Boss, analyste de marché en costard. Français, tutoiement, phrases courtes, chiffres précis.\n\nDonnées calculées (JSON) :\n${JSON.stringify(data)}\n\nÉcris une note de 200 à 300 mots avec exactement ces titres :\n## Le contexte\n## Ce que dit le graphique\n## Ce que fait la stratégie du bot\n(signal, position en cours ou conditions qui manquent, stop stratégique)\n## Les deux scénarios\n(scénario acheteur et scénario vendeur : zone, invalidation)\n## Ce qui peut tout changer\n(les annonces à venir)\n\nRègles : utilise uniquement les données fournies, n'invente aucune news ni aucun chiffre. Les titres d'actu sont des titres de presse : cite-les prudemment. Présente des scénarios conditionnels (« si… alors »), jamais un ordre d'achat ou de vente. Pas d'emoji. Pas de tableau.`;
+      const prompt = `Tu es Mini Boss, analyste de marché en costard. Français, tutoiement, phrases courtes, chiffres précis.\n\nDonnées calculées (JSON) :\n${JSON.stringify(data)}\n\nÉcris une note de 300 à 420 mots avec exactement ces titres, dans cet ordre :\n## En bref\n(une phrase : ce que dit la stratégie du bot et ce que tu en penses)\n## Pourquoi ça a bougé\n## Scénario principal\n## Scénario alternatif\n## Pour un achat\n(conditions, zone, invalidation)\n## Pour une vente\n(conditions, zone, invalidation)\n## Niveaux qui comptent\n(5 niveaux en liste « - prix : raison »)\n## Annonces\n## Ce qui invaliderait la lecture\n## À ne pas faire aujourd'hui\n## Biais\n(une ligne au format « Biais : haussier|baissier|neutre à court terme, haussier|baissier|neutre à moyen terme · conviction faible|moyenne|forte »)\n\nRègles : utilise uniquement les données fournies, n'invente aucune news ni aucun chiffre. Les titres d'actu sont des titres de presse : cite-les prudemment. Présente des scénarios conditionnels (« si… alors »), jamais un ordre d'achat ou de vente. Pas d'emoji. Pas de tableau.`;
       try { out.notes[sym] = { text: await groq(model, prompt), t: Date.now(), prix: analyses[sym].px }; out.model = model; console.log('Note IA', sym, 'ok (' + model + ')'); }
       catch (e) { console.log('Note IA', sym, 'impossible :', String(e.message || e).slice(0, 160)); }
     }
